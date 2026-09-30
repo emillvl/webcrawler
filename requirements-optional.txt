@@ -1,0 +1,3 @@
+# Optional dependencies. Install with: pip install -r requirements-optional.txt
+selenium>=4.20
+lxml>=5.0

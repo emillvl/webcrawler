@@ -1,0 +1,29 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Test / coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Crawler output
+crawl_*.json
+crawl_*.json.tmp
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
