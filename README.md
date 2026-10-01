@@ -1,14 +1,11 @@
 # WebCrawler
 
-A single-host reconnaissance crawler that maps a site and flags three classes of
-thing worth a closer look:
+WebCrawler maps a single host and flags URLs and page elements for manual review:
 
-- **Admin / hidden URLs** — paths that look like admin, login, debug or
-  back-office surfaces.
-- **SQL injection candidates** — query parameters whose names commonly carry
-  database input.
-- **XSS / input-sink candidates** — pages with text inputs, rich-text editors
-  or comment surfaces that reflect user content.
+- Paths that look like administration, login, debugging, or back-office pages.
+- Query parameters whose names suggest database input.
+- Pages with text inputs, rich-text editors, or comment fields that may handle
+  user content.
 
 It follows links with `requests`, escalates a JavaScript-rendered page to
 Selenium/Chrome when needed, respects `robots.txt`, streams findings to a JSON
@@ -17,8 +14,7 @@ report, and can resume an interrupted crawl.
 > **Authorized use only.** This tool probes a website. Run it only against
 > systems you own or have explicit written permission to test. You are
 > responsible for complying with the law and the target's terms of service.
-> The findings are *heuristics* — a flagged URL is "worth reviewing", not a
-> confirmed vulnerability.
+> A finding identifies a URL or input to review. It does not confirm a vulnerability.
 
 ---
 
@@ -81,10 +77,9 @@ checkpoint.
 
 ## How detection works
 
-All patterns live in [`signatures.py`](signatures.py) — the project's
-**detection cheat sheet**. The crawler logic stays in `webcrawler.py` and just
-consults that module, so tightening or extending detection never means touching
-the crawler.
+Detection patterns live in [`signatures.py`](signatures.py). The crawler in
+`webcrawler.py` reads them from that module. Update the patterns there; changes
+to how pages are fetched or analyzed belong in the crawler.
 
 - **Admin paths** match `signatures.ADMIN_PATH_REGEXES` against the URL *path*
   with `re.IGNORECASE`, e.g. `/admin`, `/wp-login.php`, `/phpmyadmin/`,
@@ -92,7 +87,7 @@ the crawler.
 - **SQL injection candidates** are query-string parameters whose name
   (case-insensitively) is in `signatures.SQLI_PARAM_NAMES`, e.g. `id`, `cat`,
   `order_by`, `template`. A numeric value such as `?id=3` is marked
-  `[numeric]` because it is the classic injectable case.
+  `[numeric]` to help identify numeric inputs for review.
 - **XSS / input sinks** come from parsing the page: text inputs and
   `textarea`s, `contenteditable` elements, rich-text editors (TinyMCE,
   CKEditor, Quill, …) and comment/review/chat surfaces. Each finding records
@@ -122,11 +117,12 @@ A short, human-readable summary is printed when the crawl finishes.
 
 ## Resuming, checkpoints and RAM
 
-- State is written atomically (temp file + rename), so an interrupted write
-  never corrupts the report.
+- State is written to a temporary file and renamed into place. This reduces the
+  risk of leaving a partial report when a write is interrupted.
 - State is saved every `--checkpoint-every` pages and whenever RAM exceeds
   `--ram-limit`. On save, the in-memory link/finding buffers are cleared and
-  merged with what is already on disk, keeping memory bounded.
+  merged with what is already on disk. This reduces buffer growth; `--ram-limit`
+  is an offload threshold, not a hard cap on process memory.
 - If a state file exists, the crawler asks whether to resume (interactive
   shells) or resumes automatically (piped/non-interactive runs). Use `--fresh`
   to force a new crawl or `--resume` to skip the prompt.
