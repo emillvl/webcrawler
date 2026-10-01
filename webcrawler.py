@@ -23,6 +23,7 @@ own or have explicit written permission to test.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import importlib.util
 import json
 import os
@@ -168,7 +169,8 @@ class WebCrawler:
         self.state_file = os.path.join(output_dir, f'crawl_{safe_domain}.json')
 
         self.visited: set[str] = set()
-        self.stack: list[str] = []
+        self.stack: deque[str] = deque()
+        self.queued: set[str] = set()
         self.all_links: list[str] = []
         self.findings: dict[str, list[dict[str, Any]]] = {
             'admin_pages': [],
@@ -307,36 +309,67 @@ class WebCrawler:
 
     # -- fetching ----------------------------------------------------------
 
+    def _request_static(self, url: str) -> tuple[requests.Response | None, str]:
+        """Fetch one URL while refusing cross-host redirects before following them."""
+        current = url
+        for _ in range(10):
+            try:
+                response = requests.get(
+                    current,
+                    headers=self._HEADERS,
+                    timeout=self.timeout,
+                    stream=True,
+                    allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                self._say(f'  request failed: {exc}')
+                return None, current
+
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return response, current
+
+            location = response.headers.get('Location')
+            if not location:
+                return response, current
+
+            redirected = self._normalize_url(urljoin(current, location))
+            response.close()
+            if not self._same_domain(redirected):
+                self._say(f'  blocked cross-host redirect -> {redirected}')
+                return None, current
+            current = redirected
+
+        self._say('  too many redirects; skipped')
+        return None, current
+
     def _fetch_static(self, url: str) -> FetchResult:
         self._say(f'[static] {url}')
-        try:
-            with requests.get(
-                url, headers=self._HEADERS, timeout=self.timeout, stream=True
-            ) as response:
-                status = response.status_code
-                if status >= 400:
-                    self._say(f'  HTTP {status}; skipped')
-                    return FetchResult()
-                content_type = response.headers.get('Content-Type', '').lower()
-                if content_type and not any(
-                    token in content_type for token in ('html', 'xml', 'text')
-                ):
-                    self._say(f'  skipped non-HTML ({content_type.split(";")[0]})')
-                    return FetchResult()
-                raw = bytearray()
-                for chunk in response.iter_content(65536):
-                    raw.extend(chunk)
-                    if len(raw) >= self.max_page_bytes:
-                        del raw[self.max_page_bytes:]
-                        break
-                encoding = response.encoding or 'utf-8'
-        except requests.RequestException as exc:
-            self._say(f'  request failed: {exc}')
-            return FetchResult(escalate=self.allow_selenium)
+        response, final_url = self._request_static(url)
+        if response is None:
+            return FetchResult()
+
+        with response:
+            status = response.status_code
+            if status >= 400:
+                self._say(f'  HTTP {status}; skipped')
+                return FetchResult()
+            content_type = response.headers.get('Content-Type', '').lower()
+            if content_type and not any(
+                token in content_type for token in ('html', 'xml', 'text')
+            ):
+                self._say(f'  skipped non-HTML ({content_type.split(";")[0]})')
+                return FetchResult()
+            raw = bytearray()
+            for chunk in response.iter_content(65536):
+                raw.extend(chunk)
+                if len(raw) >= self.max_page_bytes:
+                    del raw[self.max_page_bytes:]
+                    break
+            encoding = response.encoding or 'utf-8'
 
         html = bytes(raw).decode(encoding, errors='replace')
         soup = BeautifulSoup(html, _HTML_PARSER)
-        links = self._extract_links(soup, url)
+        links = self._extract_links(soup, final_url)
         if (
             self.allow_selenium
             and len(links) < self.min_static_links
@@ -356,6 +389,11 @@ class WebCrawler:
                 self._setup_selenium()
             self.driver.get(url)
             time.sleep(0.5)
+            rendered_url = self._normalize_url(self.driver.current_url)
+            if not self._same_domain(rendered_url):
+                self._say(f'  blocked cross-host browser navigation -> {rendered_url}')
+                self.driver.get('about:blank')
+                return FetchResult()
             html = self.driver.page_source
             hrefs: Sequence[str] = self.driver.execute_script(
                 "return Array.from(document.querySelectorAll('a[href]'), a => a.href);"
@@ -632,7 +670,10 @@ class WebCrawler:
         visited = resume.get('visited')
         stack = resume.get('stack')
         self.visited = {v for v in visited if isinstance(v, str)} if isinstance(visited, list) else set()
-        self.stack = [s for s in stack if isinstance(s, str)] if isinstance(stack, list) else []
+        pending = [s for s in stack if isinstance(s, str)] if isinstance(stack, list) else []
+        pending = list(dict.fromkeys(s for s in pending if s not in self.visited))
+        self.stack = deque(pending)
+        self.queued = set(pending)
         stored_links = state.get('all_links')
         self.all_links = [link for link in stored_links if isinstance(link, str)] if isinstance(stored_links, list) else []
 
@@ -655,7 +696,8 @@ class WebCrawler:
 
     def _prepare_queue(self) -> None:
         if self.fresh or not os.path.exists(self.state_file):
-            self.stack = [self.base_url]
+            self.stack = deque([self.base_url])
+            self.queued = {self.base_url}
             return
 
         should_resume = self.resume
@@ -671,7 +713,8 @@ class WebCrawler:
 
         if should_resume and self.load_state():
             return
-        self.stack = [self.base_url]
+        self.stack = deque([self.base_url])
+        self.queued = {self.base_url}
         self._say('  starting fresh')
 
     def _after_page(self) -> None:
@@ -712,7 +755,8 @@ class WebCrawler:
                     self._say(f'  reached max_pages={self.max_pages}; stopping')
                     break
 
-                current = self.stack.pop()
+                current = self.stack.popleft()
+                self.queued.discard(current)
                 if current in self.visited:
                     continue
                 if not self._can_fetch(current):
@@ -726,9 +770,10 @@ class WebCrawler:
                 result = self._fetch(current)
                 self._analyse(current, result.html)
 
-                for link in reversed(result.links):
-                    if link not in self.visited:
+                for link in result.links:
+                    if link not in self.visited and link not in self.queued:
                         self.stack.append(link)
+                        self.queued.add(link)
 
                 if self.stack:
                     time.sleep(self.delay)

@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -85,6 +86,63 @@ class UrlTests(unittest.TestCase):
         crawler = WebCrawler('example.com', output_dir='.')
         self.assertEqual(crawler.base_url, 'https://example.com/')
         self.assertEqual(crawler.host, 'example.com')
+
+
+class FrontierTests(unittest.TestCase):
+    def test_frontier_is_fifo_and_deduplicated(self):
+        crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
+        crawler.stack.extend([
+            'https://example.com/a',
+            'https://example.com/b',
+        ])
+        crawler.queued.update(crawler.stack)
+
+        first = crawler.stack.popleft()
+        crawler.queued.discard(first)
+        self.assertEqual(first, 'https://example.com/a')
+
+        candidate = 'https://example.com/b'
+        if candidate not in crawler.visited and candidate not in crawler.queued:
+            crawler.stack.append(candidate)
+            crawler.queued.add(candidate)
+        self.assertEqual(list(crawler.stack), ['https://example.com/b'])
+
+
+class RedirectScopeTests(unittest.TestCase):
+    @staticmethod
+    def _response(status, location=None):
+        response = Mock()
+        response.status_code = status
+        response.headers = {'Location': location} if location else {}
+        response.close = Mock()
+        return response
+
+    @patch('webcrawler.requests.get')
+    def test_same_host_redirect_is_followed(self, get):
+        first = self._response(302, '/next')
+        second = self._response(200)
+        get.side_effect = [first, second]
+        crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
+
+        response, final_url = crawler._request_static('https://example.com/start')
+
+        self.assertIs(response, second)
+        self.assertEqual(final_url, 'https://example.com/next')
+        self.assertEqual(get.call_count, 2)
+        first.close.assert_called_once()
+
+    @patch('webcrawler.requests.get')
+    def test_cross_host_redirect_is_blocked_before_second_request(self, get):
+        first = self._response(302, 'https://outside.example/path')
+        get.return_value = first
+        crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
+
+        response, final_url = crawler._request_static('https://example.com/start')
+
+        self.assertIsNone(response)
+        self.assertEqual(final_url, 'https://example.com/start')
+        self.assertEqual(get.call_count, 1)
+        first.close.assert_called_once()
 
 
 class AdminPathTests(unittest.TestCase):
