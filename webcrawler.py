@@ -309,7 +309,7 @@ class WebCrawler:
 
     # -- fetching ----------------------------------------------------------
 
-    def _request_static(self, url: str) -> tuple[requests.Response | None, str]:
+    def _request_static(self, url: str) -> tuple[requests.Response | None, str, bool]:
         """Fetch one URL while refusing cross-host redirects before following them."""
         current = url
         for _ in range(10):
@@ -323,30 +323,30 @@ class WebCrawler:
                 )
             except requests.RequestException as exc:
                 self._say(f'  request failed: {exc}')
-                return None, current
+                return None, current, True
 
             if response.status_code not in (301, 302, 303, 307, 308):
-                return response, current
+                return response, current, False
 
             location = response.headers.get('Location')
             if not location:
-                return response, current
+                return response, current, False
 
             redirected = self._normalize_url(urljoin(current, location))
             response.close()
             if not self._same_domain(redirected):
                 self._say(f'  blocked cross-host redirect -> {redirected}')
-                return None, current
+                return None, current, False
             current = redirected
 
         self._say('  too many redirects; skipped')
-        return None, current
+        return None, current, False
 
     def _fetch_static(self, url: str) -> FetchResult:
         self._say(f'[static] {url}')
-        response, final_url = self._request_static(url)
+        response, final_url, request_failed = self._request_static(url)
         if response is None:
-            return FetchResult()
+            return FetchResult(escalate=self.allow_selenium and request_failed)
 
         with response:
             status = response.status_code

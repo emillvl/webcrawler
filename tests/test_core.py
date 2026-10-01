@@ -124,10 +124,11 @@ class RedirectScopeTests(unittest.TestCase):
         get.side_effect = [first, second]
         crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
 
-        response, final_url = crawler._request_static('https://example.com/start')
+        response, final_url, request_failed = crawler._request_static('https://example.com/start')
 
         self.assertIs(response, second)
         self.assertEqual(final_url, 'https://example.com/next')
+        self.assertFalse(request_failed)
         self.assertEqual(get.call_count, 2)
         first.close.assert_called_once()
 
@@ -137,12 +138,22 @@ class RedirectScopeTests(unittest.TestCase):
         get.return_value = first
         crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
 
-        response, final_url = crawler._request_static('https://example.com/start')
+        response, final_url, request_failed = crawler._request_static('https://example.com/start')
 
         self.assertIsNone(response)
         self.assertEqual(final_url, 'https://example.com/start')
+        self.assertFalse(request_failed)
         self.assertEqual(get.call_count, 1)
         first.close.assert_called_once()
+
+    @patch('webcrawler.requests.get')
+    def test_network_failure_can_still_escalate_to_selenium(self, get):
+        get.side_effect = webcrawler.requests.RequestException('boom')
+        crawler = WebCrawler('https://example.com', output_dir='.', quiet=True)
+
+        result = crawler._fetch_static('https://example.com/start')
+
+        self.assertTrue(result.escalate)
 
 
 class AdminPathTests(unittest.TestCase):
